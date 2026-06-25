@@ -3,3 +3,6 @@ dist/
 *.log
 .env
 .DS_Store
+
+# agent guide — real file lives in the private harness repo
+CLAUDE.md
