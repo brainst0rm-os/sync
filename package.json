@@ -1,0 +1,21 @@
+{
+	"name": "brainstorm-sync",
+	"version": "0.0.1",
+	"private": true,
+	"description": "Brainstorm zero-knowledge sync plane — a relay-blind, ciphertext-only sync node. Separate deploy boundary from the Electron client and the commercial control plane.",
+	"license": "UNLICENSED",
+	"type": "module",
+	"scripts": {
+		"start": "bun run src/main.ts",
+		"dev": "bun --watch run src/main.ts",
+		"test": "bun test",
+		"typecheck": "tsc --noEmit",
+		"lint": "biome check .",
+		"format": "biome format --write ."
+	},
+	"devDependencies": {
+		"@biomejs/biome": "^1.9.4",
+		"@types/bun": "^1.1.0",
+		"typescript": "^5.7.2"
+	}
+}
