@@ -33,9 +33,12 @@ import { DEFAULT_LIMITS, Limits, type LimitsConfig } from "./limits";
 import type { MeterEvent } from "./metering";
 import { type RelayCore, createRelayCore } from "./server";
 import type { AccountCatalog } from "./sync/account-catalog";
+import type { AssetCas } from "./sync/asset-cas";
 import { BunS3Bucket, type S3BucketConfig } from "./sync/bun-s3-bucket";
 import { FileAccountCatalog } from "./sync/file-account-catalog";
+import { FileAssetCas } from "./sync/file-asset-cas";
 import { FileSnapshotStore } from "./sync/file-snapshot-store";
+import { ObjectAssetCas } from "./sync/object-asset-cas";
 import { ObjectAccountCatalog, ObjectSnapshotStore } from "./sync/object-store";
 import type { SnapshotStore } from "./sync/snapshot-store";
 
@@ -163,15 +166,17 @@ function log(level: "info" | "error", message: string): void {
 	else console.info(line);
 }
 
-/** Resolve the configured provider into a `{ store, catalog }` pair (or null
- *  for forward-only). The `ObjectBucket` seam means s3/local differ only here. */
+/** Resolve the configured provider into a `{ store, catalog, assetCas }` triple
+ *  (or null for forward-only). The `ObjectBucket` seam means s3/local differ
+ *  only here; the blob-plane CAS (Asset-B3) rides the same backend choice. */
 function buildStorage(
 	provider: StorageProvider,
-): { store: SnapshotStore; catalog: AccountCatalog } | null {
+): { store: SnapshotStore; catalog: AccountCatalog; assetCas: AssetCas } | null {
 	if (provider.kind === "local") {
 		return {
 			store: new FileSnapshotStore(provider.dir),
 			catalog: new FileAccountCatalog(join(provider.dir, "catalog")),
+			assetCas: new FileAssetCas(join(provider.dir, "assets")),
 		};
 	}
 	if (provider.kind === "s3") {
@@ -180,6 +185,7 @@ function buildStorage(
 		return {
 			store: new ObjectSnapshotStore(bucket, prefix),
 			catalog: new ObjectAccountCatalog(bucket, prefix),
+			assetCas: new ObjectAssetCas(bucket, prefix),
 		};
 	}
 	return null;
@@ -219,6 +225,7 @@ async function buildCore(config: Config): Promise<RelayCore> {
 			? {
 					store: storage.store,
 					catalog: storage.catalog,
+					assetCas: storage.assetCas,
 					onStoreError: (err: Error) => log("error", `store: ${err.message}`),
 				}
 			: {}),

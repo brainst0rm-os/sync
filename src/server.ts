@@ -19,15 +19,22 @@
 // relay-blind-exempt: type-only imports of the auth orchestrator. The Admission
 // instance is injected (gated mode); this file performs no crypto itself.
 import type { Admission, AdmissionResult, AuthMessage } from "./admission";
+// relay-blind-exempt-free: the asset wire is a crypto-free content-address
+// router (opaque ciphertext keyed by an opaque hash; no key, no decrypt).
+import { AssetWireKind, handleAssetRequest } from "./asset-wire";
 import { AuditLog, type AuditSink } from "./audit-log";
 import type { Limits } from "./limits";
 import { type MeterEvent, MeterKind, type MeterSink } from "./metering";
 import { FrameRouter } from "./router";
 import type { AccountCatalog } from "./sync/account-catalog";
+import type { AssetCas } from "./sync/asset-cas";
 import { type SnapshotStore, persistFrame } from "./sync/snapshot-store";
 
 const CONTROL_CHANNEL_BYTE = 0x00;
 const FRAME_CHANNEL_BYTE = 0x01;
+/** Asset-B3 — the blob plane: content-addressed chunk PUT/GET/HAS, distinct
+ *  from the Y.Doc relay's entity-routed fan-out. */
+const ASSET_CHANNEL_BYTE = 0x02;
 const DEFAULT_AUTH_TIMEOUT_MS = 10_000;
 
 /** WS close codes for gated rejections (4xxx = application range). */
@@ -48,6 +55,10 @@ export type RelayServerOptions = {
 	onStoreError?: (error: Error) => void;
 	/** SYNC-4a — account catalog (`sender→entityId`, `catalog` query answer). */
 	catalog?: AccountCatalog;
+	/** Asset-B3 — the content-addressed chunk store (blob plane). Absent ⇒ the
+	 *  node has no asset plane (asset frames are dropped); the Y.Doc plane is
+	 *  unaffected. */
+	assetCas?: AssetCas;
 	/** SYNC-4b — when present, the node is GATED: a connection must complete the
 	 *  token + identity handshake before it can emit / subscribe / query. Absent
 	 *  ⇒ open admission (dev / forward node), wire path unchanged. */
@@ -134,7 +145,7 @@ export function createRelayCore(opts: RelayServerOptions = {}): RelayCore {
 	const connState = new Map<string, ConnState>();
 	const mintConnId = opts.mintConnId ?? defaultMintConnId();
 	const now = opts.now ?? Date.now;
-	const { store, catalog, admission, meter, limits } = opts;
+	const { store, catalog, admission, meter, limits, assetCas } = opts;
 	const authTimeoutMs = opts.authTimeoutMs ?? DEFAULT_AUTH_TIMEOUT_MS;
 	const setTimer = opts.setTimer ?? ((cb, ms) => setTimeout(cb, ms));
 	const clearTimer = opts.clearTimer ?? ((h) => clearTimeout(h as ReturnType<typeof setTimeout>));
@@ -180,6 +191,46 @@ export function createRelayCore(opts: RelayServerOptions = {}): RelayCore {
 		} catch {
 			// closed socket — drop quietly.
 		}
+	}
+
+	function sendAsset(toConnId: string, frame: Uint8Array): void {
+		const ws = connections.get(toConnId);
+		if (!ws) return;
+		const wire = new Uint8Array(1 + frame.length);
+		wire[0] = ASSET_CHANNEL_BYTE;
+		wire.set(frame, 1);
+		try {
+			ws.send(wire);
+		} catch {
+			// closed socket — drop quietly.
+		}
+	}
+
+	/**
+	 * Asset-B3 — serve one blob-plane request (HAS / PUT / GET) against the CAS
+	 * and reply point-to-point on the asset channel (no fan-out — it's
+	 * request/response, not pub/sub). Gated by the same admission as frames; a
+	 * PUT is metered as ingress, a served GET as egress. A malformed request is
+	 * dropped (never crashes the connection).
+	 */
+	function handleAsset(connId: string, state: ConnState, body: Uint8Array): void {
+		if (limits?.frameTooLarge(body.length)) return;
+		if (admission && !state.authenticated) return;
+		if (!assetCas) return; // no asset plane configured
+		void handleAssetRequest(assetCas, body)
+			.then(({ kind, response, meteredBytes }) => {
+				sendAsset(connId, response);
+				if (meteredBytes > 0) {
+					emit({
+						kind: kind === AssetWireKind.Put ? MeterKind.Ingress : MeterKind.Egress,
+						account: state.account,
+						sub: state.sub,
+						plan: state.plan,
+						bytes: meteredBytes,
+					});
+				}
+			})
+			.catch(reportStoreError);
 	}
 
 	function disarmAuthTimer(state: ConnState): void {
@@ -270,6 +321,10 @@ export function createRelayCore(opts: RelayServerOptions = {}): RelayCore {
 			if (channel === CONTROL_CHANNEL_BYTE) {
 				if (limits?.controlTooLarge(bytes.length - 1)) return;
 				handleControl(ws, connId, state, bytes.subarray(1));
+				return;
+			}
+			if (channel === ASSET_CHANNEL_BYTE) {
+				handleAsset(connId, state, bytes.subarray(1));
 				return;
 			}
 			// Unknown channel byte — drop silently (forward-compat).
